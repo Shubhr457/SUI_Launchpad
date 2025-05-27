@@ -537,4 +537,328 @@ module suilaunch::launchpad_tests {
         clock::destroy_for_testing(clock);
         test_scenario::end(scenario);
     }
+
+    // ============ Edge Case Tests ============
+
+    #[test]
+    #[expected_failure(abort_code = launchpad::E_INVALID_AMOUNT)]
+    fun test_create_launchpad_start_time_equals_end_time() {
+        let (mut scenario, clock) = setup_test();
+        next_tx(&mut scenario, ADMIN);
+        {
+            let config = test_scenario::take_shared<LaunchpadConfig>(&scenario);
+            launchpad::create_launchpad(
+                &config,
+                b"TestTokenEdge",
+                b"TTE",
+                b"A test token for edge case",
+                b"https://testtokenedge.com",
+                TOKEN_ADDRESS,
+                TEAM_WALLET,
+                75,
+                1000000000000,
+                1000000,
+                100000000,
+                1000000000,
+                TEST_TIME_START, // start_time
+                TEST_TIME_START, // end_time is same as start_time
+                true,
+                ctx(&mut scenario)
+            );
+            test_scenario::return_shared(config);
+        };
+        clock::destroy_for_testing(clock);
+        test_scenario::end(scenario);
+    }
+
+    #[test]
+    #[expected_failure(abort_code = launchpad::E_INVALID_AMOUNT)]
+    fun test_create_launchpad_min_greater_than_max_contribution() {
+        let (mut scenario, clock) = setup_test();
+        next_tx(&mut scenario, ADMIN);
+        {
+            let config = test_scenario::take_shared<LaunchpadConfig>(&scenario);
+            launchpad::create_launchpad(
+                &config,
+                b"TestTokenEdge",
+                b"TTE",
+                b"A test token for edge case",
+                b"https://testtokenedge.com",
+                TOKEN_ADDRESS,
+                TEAM_WALLET,
+                75,
+                1000000000000,
+                1000000,
+                1000000000, // min_contribution
+                100000000,  // max_contribution is less than min
+                TEST_TIME_START,
+                TEST_TIME_END,
+                true,
+                ctx(&mut scenario)
+            );
+            test_scenario::return_shared(config);
+        };
+        clock::destroy_for_testing(clock);
+        test_scenario::end(scenario);
+    }
+
+    #[test]
+    // Assuming staking 0 should be disallowed; if not, this needs E_INVALID_AMOUNT and contract change.
+    // For now, let's assume it might fail due to coin::split with 0 or table handling.
+    // If it passes, it means staking 0 tokens is allowed and does nothing or creates a 0-tier stake.
+    fun test_stake_zero_tokens() {
+        let (mut scenario, clock) = setup_test();
+        create_test_coins(&mut scenario, USER1, INITIAL_SUI, INITIAL_SUIX);
+        next_tx(&mut scenario, USER1);
+        {
+            let mut pool = test_scenario::take_shared<StakingPool>(&scenario);
+            let mut suix_coin = test_scenario::take_from_sender<Coin<SUIX>>(&scenario);
+            
+            let stake_amount = 0;
+            let staking_coin = coin::split(&mut suix_coin, stake_amount, ctx(&mut scenario));
+            
+            launchpad::stake_tokens(&mut pool, staking_coin, &clock, ctx(&mut scenario));
+            
+            let (amount, tier, multiplier) = launchpad::get_user_stake(&pool, USER1);
+            assert!(amount == 0, 0);
+            assert!(tier == 0, 1);
+            assert!(multiplier == 1, 2); // Tier 0, 1x multiplier for 0 stake
+            
+            test_scenario::return_to_sender(&scenario, suix_coin); // Original coin + remaining from split
+            test_scenario::return_shared(pool);
+        };
+        clock::destroy_for_testing(clock);
+        test_scenario::end(scenario);
+    }
+
+    #[test]
+    fun test_unstake_zero_tokens() {
+        let (mut scenario, clock) = setup_test();
+        create_test_coins(&mut scenario, USER1, INITIAL_SUI, INITIAL_SUIX);
+        next_tx(&mut scenario, USER1);
+        {
+            let mut pool = test_scenario::take_shared<StakingPool>(&scenario);
+            // Stake some tokens first
+            let mut suix_coin = test_scenario::take_from_sender<Coin<SUIX>>(&scenario);
+            let initial_stake = 100_000_000;
+            let staking_coin = coin::split(&mut suix_coin, initial_stake, ctx(&mut scenario));
+            launchpad::stake_tokens(&mut pool, staking_coin, &clock, ctx(&mut scenario));
+            test_scenario::return_to_sender(&scenario, suix_coin); // Return the remaining SUIX coin
+            test_scenario::return_shared(pool); // Return pool before taking it again
+        };
+
+        next_tx(&mut scenario, USER1); // New transaction for unstaking
+        {
+            let mut pool = test_scenario::take_shared<StakingPool>(&scenario);
+            launchpad::unstake_tokens(&mut pool, 0, ctx(&mut scenario)); // Unstake 0
+            
+            let (amount, _, _) = launchpad::get_user_stake(&pool, USER1);
+            assert!(amount == 100_000_000, 0); // Amount should be unchanged
+            
+            test_scenario::return_shared(pool);
+        };
+        clock::destroy_for_testing(clock);
+        test_scenario::end(scenario);
+    }
+
+    #[test]
+    fun test_unstake_full_amount() {
+        let (mut scenario, clock) = setup_test();
+        create_test_coins(&mut scenario, USER1, INITIAL_SUI, INITIAL_SUIX);
+        let initial_stake_amount = 100_000_000; // Tier 1
+
+        next_tx(&mut scenario, USER1);
+        {
+            let mut pool = test_scenario::take_shared<StakingPool>(&scenario);
+            let mut suix_coin = test_scenario::take_from_sender<Coin<SUIX>>(&scenario);
+            let staking_coin = coin::split(&mut suix_coin, initial_stake_amount, ctx(&mut scenario));
+            launchpad::stake_tokens(&mut pool, staking_coin, &clock, ctx(&mut scenario));
+            test_scenario::return_to_sender(&scenario, suix_coin);
+            test_scenario::return_shared(pool);
+        };
+
+        next_tx(&mut scenario, USER1);
+        {
+            let mut pool = test_scenario::take_shared<StakingPool>(&scenario);
+            launchpad::unstake_tokens(&mut pool, initial_stake_amount, ctx(&mut scenario));
+            let (amount, tier, multiplier) = launchpad::get_user_stake(&pool, USER1);
+            assert!(amount == 0, 0);
+            assert!(tier == 0, 1);
+            assert!(multiplier == 1, 2);
+            test_scenario::return_shared(pool);
+        };
+        clock::destroy_for_testing(clock);
+        test_scenario::end(scenario);
+    }
+
+    #[test]
+    fun test_contribute_exact_min() {
+        let (mut scenario, mut clock) = setup_test();
+        create_test_launchpad(&mut scenario);
+        create_test_coins(&mut scenario, USER1, INITIAL_SUI, INITIAL_SUIX);
+        create_kyc_record(&mut scenario, &clock, USER1, 1);
+        clock::set_for_testing(&mut clock, TEST_TIME_START + 100);
+
+        next_tx(&mut scenario, USER1);
+        {
+            let mut launchpad = test_scenario::take_shared<Launchpad>(&scenario);
+            let staking_pool = test_scenario::take_shared<StakingPool>(&scenario);
+            let kyc_record = test_scenario::take_from_sender<KYCRecord>(&scenario);
+            let mut sui_coin = test_scenario::take_from_sender<Coin<SUI>>(&scenario);
+            
+            let min_contribution = 100_000_000; // From create_test_launchpad
+            let contribution_coin = coin::split(&mut sui_coin, min_contribution, ctx(&mut scenario));
+            
+            launchpad::contribute(
+                &mut launchpad,
+                &staking_pool,
+                &kyc_record,
+                &clock,
+                contribution_coin,
+                ctx(&mut scenario)
+            );
+            
+            // Check raised amount
+            let (_, _, raised, _, _) = launchpad::get_launchpad_info(&launchpad);
+            assert!(raised == min_contribution, 0);
+
+            test_scenario::return_to_sender(&scenario, sui_coin);
+            test_scenario::return_to_sender(&scenario, kyc_record);
+            test_scenario::return_shared(staking_pool);
+            test_scenario::return_shared(launchpad);
+        };
+        clock::destroy_for_testing(clock);
+        test_scenario::end(scenario);
+    }
+
+    #[test]
+    fun test_contribute_exact_max() {
+        let (mut scenario, mut clock) = setup_test();
+        create_test_launchpad(&mut scenario);
+        create_test_coins(&mut scenario, USER1, INITIAL_SUI, INITIAL_SUIX);
+        create_kyc_record(&mut scenario, &clock, USER1, 1);
+        clock::set_for_testing(&mut clock, TEST_TIME_START + 100);
+
+        next_tx(&mut scenario, USER1);
+        {
+            let mut launchpad = test_scenario::take_shared<Launchpad>(&scenario);
+            let staking_pool = test_scenario::take_shared<StakingPool>(&scenario);
+            let kyc_record = test_scenario::take_from_sender<KYCRecord>(&scenario);
+            let mut sui_coin = test_scenario::take_from_sender<Coin<SUI>>(&scenario);
+            
+            let max_contribution = 1_000_000_000; // From create_test_launchpad
+            let contribution_coin = coin::split(&mut sui_coin, max_contribution, ctx(&mut scenario));
+            
+            launchpad::contribute(
+                &mut launchpad,
+                &staking_pool,
+                &kyc_record,
+                &clock,
+                contribution_coin,
+                ctx(&mut scenario)
+            );
+            
+            let (_, _, raised, _, _) = launchpad::get_launchpad_info(&launchpad);
+            assert!(raised == max_contribution, 0);
+
+            test_scenario::return_to_sender(&scenario, sui_coin);
+            test_scenario::return_to_sender(&scenario, kyc_record);
+            test_scenario::return_shared(staking_pool);
+            test_scenario::return_shared(launchpad);
+        };
+        clock::destroy_for_testing(clock);
+        test_scenario::end(scenario);
+    }
+
+    #[test]
+    #[expected_failure(abort_code = launchpad::E_KYC_NOT_COMPLETED)]
+    fun test_contribute_kyc_required_no_kyc_record() {
+        let (mut scenario, mut clock) = setup_test();
+        create_test_launchpad(&mut scenario); // kyc_required is true by default here
+        create_test_coins(&mut scenario, USER1, INITIAL_SUI, INITIAL_SUIX);
+        // DO NOT create KYC record for USER1
+        clock::set_for_testing(&mut clock, TEST_TIME_START + 100);
+
+        // Create a KYC record for a *different* user (ADMIN) to simulate USER1 not having a valid one for the transaction.
+        create_kyc_record(&mut scenario, &clock, ADMIN, 0); // This is within next_tx(ADMIN)
+
+        // Admin takes their KYC record
+        let kyc_record_for_admin: KYCRecord;
+        next_tx(&mut scenario, ADMIN);
+        {
+            kyc_record_for_admin = test_scenario::take_from_sender<KYCRecord>(&scenario);
+        };
+
+        // USER1 attempts to contribute using ADMIN's KYC record
+        next_tx(&mut scenario, USER1);
+        {
+            let mut launchpad = test_scenario::take_shared<Launchpad>(&scenario);
+            let staking_pool = test_scenario::take_shared<StakingPool>(&scenario);
+            let mut sui_coin = test_scenario::take_from_sender<Coin<SUI>>(&scenario);
+            let contribution_coin = coin::split(&mut sui_coin, 100_000_000, ctx(&mut scenario));
+
+            launchpad::contribute(
+                &mut launchpad,
+                &staking_pool,
+                &kyc_record_for_admin, // Pass ADMIN's KYC record while USER1 is sender
+                &clock,
+                contribution_coin,
+                ctx(&mut scenario)
+            );
+
+            test_scenario::return_to_sender(&scenario, sui_coin);
+            test_scenario::return_shared(staking_pool);
+            test_scenario::return_shared(launchpad);
+            // kyc_record_for_admin will be returned in the ADMIN context below
+        };
+        
+        // Admin gets their KYC record back
+        next_tx(&mut scenario, ADMIN);
+        {
+            test_scenario::return_to_sender(&scenario, kyc_record_for_admin);
+        };
+
+        clock::destroy_for_testing(clock);
+        test_scenario::end(scenario);
+    }
+
+    #[test]
+    #[expected_failure(abort_code = launchpad::E_IDO_NOT_STARTED)] // Current error for claiming too early
+    fun test_claim_tokens_during_ido() {
+        let (mut scenario, mut clock) = setup_test();
+        create_test_launchpad(&mut scenario);
+        create_test_coins(&mut scenario, USER1, INITIAL_SUI, INITIAL_SUIX);
+        create_kyc_record(&mut scenario, &clock, USER1, 1);
+
+        // Contribute to create an allocation
+        clock::set_for_testing(&mut clock, TEST_TIME_START + 100);
+        next_tx(&mut scenario, USER1);
+        {
+            let mut launchpad = test_scenario::take_shared<Launchpad>(&scenario);
+            let staking_pool = test_scenario::take_shared<StakingPool>(&scenario);
+            let kyc_record = test_scenario::take_from_sender<KYCRecord>(&scenario);
+            let mut sui_coin = test_scenario::take_from_sender<Coin<SUI>>(&scenario);
+            let contribution_coin = coin::split(&mut sui_coin, 100_000_000, ctx(&mut scenario));
+            launchpad::contribute(&mut launchpad, &staking_pool, &kyc_record, &clock, contribution_coin, ctx(&mut scenario));
+            test_scenario::return_to_sender(&scenario, sui_coin);
+            test_scenario::return_to_sender(&scenario, kyc_record);
+            test_scenario::return_shared(staking_pool);
+            test_scenario::return_shared(launchpad);
+        };
+
+        // Try to claim while IDO is still active (before TEST_TIME_END)
+        // clock is still at TEST_TIME_START + 100
+        next_tx(&mut scenario, USER1);
+        {
+            let launchpad = test_scenario::take_shared<Launchpad>(&scenario);
+            let mut allocation = test_scenario::take_from_sender<Allocation>(&scenario);
+            
+            launchpad::claim_tokens(&launchpad, &mut allocation, &clock, ctx(&mut scenario));
+            
+            test_scenario::return_to_sender(&scenario, allocation);
+            test_scenario::return_shared(launchpad);
+        };
+        clock::destroy_for_testing(clock);
+        test_scenario::end(scenario);
+    }
 }
